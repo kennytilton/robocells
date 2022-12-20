@@ -1,0 +1,257 @@
+;;;
+;;; Copyright © 1995,2003 by Kenneth William Tilton.
+;;;
+;;; Permission is hereby granted, free of charge, to any person obtaining a copy 
+;;; of this software and associated documentation files (the "Software"), to deal 
+;;; in the Software without restriction, including without limitation the rights 
+;;; to use, copy, modify, merge, publish, distribute, sublicense, and/or sell 
+;;; copies of the Software, and to permit persons to whom the Software is furnished 
+;;; to do so, subject to the following conditions:
+;;;
+;;; The above copyright notice and this permission notice shall be included in 
+;;; all copies or substantial portions of the Software.
+;;;
+;;; THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR 
+;;; IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, 
+;;; FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE 
+;;; AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER 
+;;; LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING 
+;;; FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS 
+;;; IN THE SOFTWARE.
+
+
+28-Aug-2003
+
+Caveat cupper
+-------------
+First and foremost, this stuff is being shared for the first time today. 
+I even rearranged things so stuff that used to be in a separate utilities package is
+now in the Cells package. Even without that source of turmoil, I develop using the ACL/Win32
+project builder for system building and that loads serially. ASDF first compiles 
+and loads anything changed. So a build from scratch will work (everything is
+changed) but later builds will fail if I missed a dependency.
+
+If you do not like bleeding edge, please come back in a couple of weeks after others
+have slapped me around with bug reports at: ktilton@nyc.rr.com (I will also look into
+getting the SourceForge site working for bug reports, etc.)
+
+System requirements
+-------------------
+- Common Lisp (see below for tested environments)
+- Cells (included; this is my CL constraints hack similar to Garnet's KR)
+- UDP (datagram) sockets
+- RoboCup Soccer Server and Monitor: tested against 9.3.2 and 9.4.5, other "nines" possibly.
+  Pre-built win32 binaries, source for Linux to build your own, are available here:
+
+     http://sserver.sourceforge.net/
+
+Tested environments
+-------------------
+ACL/Win32 -- my regular development environment. UDP support built in.
+
+CMUCL/Linux(Debian) -- requires db-sockets. well, I hear now that CMUCL has UDP sockets 
+  built-in, but you'll have to help me conditionalize the code and work those in. That
+  would be great if someone wants to do that, because a quick look at rc-socket-read
+  will reveal some heroics necessary to get cmucl to play well with db-sockets.
+
+ACL/Linux -- an early version of RoboCells worked fine, but with db-sockets. The lisp-nyc
+  crew will be checking out this new version under ACL/Linux. Stay tuned.
+
+Other testing: Earlier versions of Cells were tested successfully under CLisp, Lispworks,
+  Corman CL, and MCL 4.3 (OS 9). Then you just need UDP sockets. I will gladly help anyone
+  trying to get other configurations working and merge in new code to keep the project
+  single-source.
+
+Documentation
+-------------
+I have not yet begun to write. But that is a top priority, of course.
+
+The RoboCup doc is under "Docs" at: http://sserver.sourceforge.net/
+
+For Cells documentation, at the top level of the RoboCells source tree 
+is 01-Cell-basics.lisp. And in the cellstest subdirectory most tests
+are heavily commented with explanations of obscure Cell features
+being exercised. And I will shortly move some old, sloppy PDFs from:
+
+   http://tilton-technology.com
+
+... to the SourceForge RoboCells project. But you will be helpless without 
+documentation of DEFTASK and the rest of the RoboCells framework (heck, most of 
+the example deftasks in the source are obsolete and won't work), so 
+documentation will appear on SourceForge in another day or so. More  
+working deftasks will be the next top priority.
+
+Win32 Install
+-------------
+Expand source tree into directory <DIR> on drive <DEV>.
+
+Start Lisp, open "build.lisp", found in the top directory of the source tree.
+
+Modify the following (in build.lisp, not here) to point to the newly created source tree,
+then evaluate (ignore CMU stuff for these win32 install directions):
+
+ (load #+cmu "asdf-155"
+	#-cmu "d:/robocells/asdf-155.lisp")
+
+That sets you up with ASDF, "another system definition" module.
+
+Modify the following (in build.lisp) to match the drive <DEV>
+and directory <DIR> of the new source tree:
+
+ (progn
+  (push (make-pathname
+         #+lispworks :host #-lispworks :device <DEV>
+         :directory
+         #+cmu "/home/kenny/rc/robocells"
+         #+allegro <DIR>)
+    asdf:*central-registry*)
+  (asdf:oos 'asdf:load-op :robocells :force t))
+
+My source is in D:/robocells, so I have:
+
+ (progn ;; eval-when (compile load)
+  (push (make-pathname
+         #+lispworks :host #-lispworks :device "D"
+         :directory
+         #+cmu "/home/kenny/rc/robocells"
+         #+allegro "/robocells")
+    asdf:*central-registry*)
+  (asdf:oos 'asdf:load-op :robocells :force t))
+
+Now evaluate the modified form. I get no warnings, so look into any that
+do arise and let me know.
+
+If all goes well, start up the Soccer Server. We want to run in a special "trainer
+mode" during development, so you have to set that up. It varies between 9.3 and the 
+latest, 9.4.5.
+
+9.3.x: make a shortcut with this target (right-click a shortcut to the binary,
+       select "Properties, and edit the target field: 
+
+    D:\wherever\rcssserver.exe -sfile server.conf -pfile player.conf -coach
+
+       The -coach puts the server in trainer mode. The -sfile and -pfile tell
+       the server to write out default configuration files you may want to
+       play with eventually.
+
+9.4.5: Much different. I started up the server and it went ahead and created
+       configuration files which I was eventually able to find:
+
+    C:\WINNT\Profiles\Administrator\Personal\.rcssserver\server.conf
+
+       About a third of the way down you'll find:
+
+    # server::coach
+    server::coach = 0
+
+       Change the 0 to 1 (primitive, isn't it?)
+
+    Lots of other fun options in there. I found half-time to be at 30 seconds.
+    Weird that. Changed it to 300seconds. (The time is in cycles, which are
+    100ms, and maybe they goofed that up and put in 300 thinking it was seconds.
+    This makes sense because half-time is indeed at five minutes.
+
+OK, now shut down the soccer server and start her back up.
+
+Now start up the monitor that came with the server, which will likely be
+the TsinghuAeolus (Tsing Tsao Beer) monitor. Hit the very first icon under the
+title bar at the top left of the window. It's a zig-zag arrow. That should
+open up a "Server Connection Set-up" dialog. Leave the port as 6000, change the
+server IP to 127.1 if you are running on one system, otherwise the IP of the system
+running the soccer server.
+
+If all is well you'll see "left" and "right" teams, but no players, just those names.
+Now for practice, hit the next icon to the right to disconnect, then the first icon
+to reconnect, this time without having to reenter the server IP. This is good because:
+
+CAVEAT! The Tsinghu monitor crashes if left connected for 10-15 minutes, so try to remember
+to disconnect before going to work on your code.
+
+SUPER CAVEAT!!!! The soccer server gets shut out by the Lisp process CPU-wise (well, by ACL
+anyway). If you start play without taking the following step, nothing seems to happen, 
+with Lisp just hanging. Even now (if you forget and start this way) it is not too late to:
+
+- right click the task bar and start the TaskManager
+- select the processes tab
+- find your Lisp process (in my case allegro-ansi.exe)
+- right click on that, select "Set priority" and set it to "low"
+
+Ready to "play"? The code is shipped ready to run a silly drill five times, in which the goalie
+runs to get between the ball and the center of the goal. Start the action by:
+
+   At the Lisp repl, enter: (gon)
+
+Short for "game on!".
+
+CMUCL Install
+-------------
+Expand source tree into directory <DIR>.
+
+   cd <dir>
+
+in my case, it is:
+
+   cd /home/kenny/rc/robocells
+
+Edit the build file:
+
+   emacs build.lisp &
+
+Modify the following (in build.lisp) to match the 
+directory <DIR> of the new source tree:
+
+ (progn
+  (push (make-pathname
+         #+lispworks :host #-lispworks :device <DEV>
+         :directory
+         #+cmu <DIR>
+         #+allegro "/robocells")
+    asdf:*central-registry*)
+  (asdf:oos 'asdf:load-op :robocells :force t))
+
+My source is in /home/kenny/rc/robocells, so I have:
+
+ (progn ;; eval-when (compile load)
+  (push (make-pathname
+         #+lispworks :host #-lispworks :device "D"
+         :directory
+         #+cmu "/home/kenny/rc/robocells"
+         #+allegro "/robocells")
+    asdf:*central-registry*)
+  (asdf:oos 'asdf:load-op :robocells :force t))
+
+Save the changes to build.lisp.
+
+Aside: you may notice this in build.lisp:
+
+  #-asdf
+  (load #+cmu "asdf-155"
+	  #-cmu "d:/robocells/asdf-155.lisp")
+
+My cmucl comes with ASDF built-in, but asdf-155.lisp has been included
+in the source tree and will load if your cmucl does not know about ASDF.
+
+Now enter Lisp;
+
+   lisp -load build.lisp
+
+That kicks off a full build, which expects db-sockets to be installed. You 
+can preflight by:
+
+   at the console prompt: lisp
+   at the lisp prompt *: (require :db-sockets)
+
+If all goes well, start up the server and monitor. See trainer-start.sh and trainer-stop.sh, which are
+set up for server 9.3.2. See the Windows install directions for important differences in
+setting up 9.4.5, the latest.
+
+Now start up the monitor that came with the server. Hit "connect", and fill in the server IP,
+which will be "127.1" if everything is running on the same box.
+
+Ready to "play"? The code is shipped ready to run a silly drill five times, in which the goalie
+runs to get between the ball and the center of the goal. Start the action by:
+
+   At the Lisp repl, enter: (gon)
+
+Short for "game on!".
+

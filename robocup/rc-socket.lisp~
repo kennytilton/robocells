@@ -1,0 +1,326 @@
+;; -*- mode: Lisp; Syntax: Common-Lisp; Package: cells; -*-
+;;;
+;;; Copyright © 1995,2003 by Kenneth William Tilton.
+;;;
+;;; Permission is hereby granted, free of charge, to any person obtaining a copy 
+;;; of this software and associated documentation files (the "Software"), to deal 
+;;; in the Software without restriction, including without limitation the rights 
+;;; to use, copy, modify, merge, publish, distribute, sublicense, and/or sell 
+;;; copies of the Software, and to permit persons to whom the Software is furnished 
+;;; to do so, subject to the following conditions:
+;;;
+;;; The above copyright notice and this permission notice shall be included in 
+;;; all copies or substantial portions of the Software.
+;;;
+;;; THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR 
+;;; IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, 
+;;; FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE 
+;;; AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER 
+;;; LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING 
+;;; FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS 
+;;; IN THE SOFTWARE.
+
+(in-package :robocup)
+
+; --- make ----------------------------------------
+
+(defclass rc-socket ()
+  ((udp-socket :accessor udp-socket)
+   (host :initform
+	 #+allegro "127.0.0.1"
+	 ;;#-allegro #(192 168 2 116)
+	 #+cmu #(127 0 0 1)
+     :initarg :host :accessor host)
+   #-allegro (stream :initform nil :initarg :stream :accessor stream)
+   #-allegro (initialized :initform nil :accessor initialized)
+   (send-port :initform 6000 :initarg :send-port :accessor send-port)
+   (buffer :initform (make-server-buffer) :accessor buffer)
+   (last-receive-time :initform 0 :accessor last-receive-time)
+   (last-send-time :initform 0 :accessor last-send-time)))
+
+(defmethod initialize-instance :after ((self rc-socket) &key)
+  (setf (udp-socket self) 
+	#+allegro (socket::make-socket
+		   :type :datagram
+		   ;;:connect :passive
+		   :remote-host (host self)
+		   :remote-port (send-port self))
+	#-allegro (let ((us (make-instance 'sockets:inet-socket
+					   :type :datagram
+					   :protocol :udp)))
+		    (trc "connecting to" (host self)(send-port self))
+		    (socket-connect us (host self) (send-port self))
+		    (setf (stream self)
+			  (socket-make-stream us
+			     :input t
+			     :output t
+			     :buffering :none))
+		    us)
+	))
+
+(defun make-server-buffer ()
+  (make-array 4096 :element-type 'character :fill-pointer t))
+
+(defun ncopy-server-buffer (to from)
+  (progn
+      (setf (fill-pointer to) (length from))
+      (replace to from)
+    ))
+
+(defun server-buffer-clear (b)
+  (setf (fill-pointer b) 0))
+
+; --- send ------------------------------------------
+
+(defun rc-socket-send (rcs c$ &optional (port (or (send-port rcs) 6000)) &aux (len (length c$)))
+  (declare (ignorable #-allegro port))
+  (assert (and (stringp c$)
+            (> len 3) ;; "()\null"
+            (eql #\null (elt c$ (1- len)))
+            (eql #\( (elt c$ 0))
+            (eql #\) (elt c$ (- len 2)))))
+  (trc "rc-socket-send>" (subseq c$ 0 (1- len)) port)
+
+  #+allegro
+  (socket::send-to (udp-socket rcs) c$ len :remote-port port)
+
+  #-allegro
+  (progn
+    (format (stream rcs) (subseq c$ 0 len))
+    (unless (initialized rcs)
+      (force-output (stream rcs))
+      (close (stream rcs))
+      (socket-close (udp-socket rcs))
+      (setf (udp-socket rcs) (make-instance 'inet-socket
+                             :type :datagram
+                             :protocol :udp))
+      (trc nil "about to socket-bind" rcs (udp-socket rcs))
+      (socket-bind (udp-socket rcs) #(0 0 0 0) 0)
+      (trc nil "after socket-bind")
+      (setf (non-blocking-mode (udp-socket rcs)) t)))
+
+  (setf *last-send-time* (now)))
+
+; --- read --------------------------------------------
+
+(defun rc-socket-read (rcs &aux (udps (udp-socket rcs)) (max-size (array-total-size (buffer rcs))))
+  (assert (buffer rcs))
+  (trc "about to rc-socket-read" udps rcs)
+  #-allegro
+  (setf (fill-pointer (buffer rcs)) max-size)
+  (multiple-value-bind (data size host port)
+      #+allegro (socket::receive-from udps
+                  max-size
+                  :buffer (buffer rcs)
+                  :extract t)
+    #-allegro
+    (do ((try-ct 1 (1+ try-ct))
+	 )
+	(nil)
+      (multiple-value-bind (d sz h p)
+	  (handler-case
+	   (sockets::socket-receive udps
+				    (buffer rcs)
+				    max-size)
+	   (sockets::socket-error (c)
+              (case (sockets::socket-error-symbol c)
+		(sockets-internal::eintr
+		 (trc "socket EINTR" (send-port rcs) (type-of (buffer rcs)))
+		 (values (buffer rcs) 0 nil (send-port rcs)))
+		(sockets-internal::ebadf
+		 (break "socket EBADF: too long debugging? ~a" (send-port rcs)))
+		(otherwise
+		 (if (eql 14 (sockets::socket-error-errno c))
+		     (progn
+		       (cond
+			;;((= try-ct 1) (trc "trying same buffer" (send-port rcs)))
+			((= try-ct 1)
+			 (trc "trying new buffer" (send-port rcs))
+			 (setf (buffer rcs) (make-server-buffer)))
+			(t (break "no more ideas, failing on EFAULT ~a ~a" rcs (send-port rcs))))
+		       (values nil -1 nil nil))
+		   (let ((sym (sockets::socket-error-symbol c))
+			 (eno (sockets::socket-error-errno c)))
+		     (trc "unexpected socket-receive esym, errno" sym eno)
+		     (break "socket error ~a, sym ~a, eno"
+			    c sym eno)))))))
+	 (UNLESS (minusp sz)
+	    (return (values d sz h p)))))
+	 
+    (declare (ignorable host #+allegro size))
+    
+    #-allegro ;; acl/win32 gens new string for us each time
+    (progn
+      (assert (eq data (buffer rcs))) ;; everyone on the same page?
+      (setf (fill-pointer data) size))
+
+    (progn ;; unless (zerop size)
+      (trc "socket read size" (send-port rcs) size (subseq data 0 (min 10 size))))
+        
+    (unless (eql (count #\( data) (count #\) data))
+      (trc "server parens mismatch: left>" (count #\( data) :right> (count #\) data))
+      (pbad data)
+      (break))
+
+    ;; tricky here. the server sends a null-terminated string,
+    ;; which the reader can do weird things with. so we'll overwrite
+    ;; the null with the first of the three parens we are affixing
+    ;;
+    #+yikes (let ((size-padded (+ 2 size)))
+              (dotimes (i 3)
+                (setf (aref data (+ i size -1)) #\)))
+              (setf (fill-pointer data) size-padded)
+              (trc "buffer ends" (subseq data ( - size 10) size-padded)))
+
+    (trc nil "after socket read"
+      (subseq data 0 (min 20 size)) size (length data) port)
+
+    (setf *last-receive-time*
+      (setf (last-receive-time rcs) (now)))
+
+    (when port
+      (unless (eql port (send-port rcs)) ;; in case they switch in mid-chat
+        (trc "rc-socket-read shows port old/new" (send-port rcs) port)
+        (setf (send-port rcs) port)
+        #-allegro
+        (unless (initialized rcs)
+          (socket-connect (udp-socket rcs) (host rcs) port)
+          (trc "socket reconnect new port" port)
+          (setf (stream rcs) (socket-make-stream (udp-socket rcs)
+                               :input t
+                               :output t
+                               :buffering :none))
+          (setf (initialized rcs) t))))
+      
+    data))
+
+
+(defparameter *rs* nil)
+
+#+test
+(rcs-test *rs*)                          
+
+#+test
+(defparameter *rs* (rcs-test))
+
+#+test
+(rcs-read *rs*)
+
+(defun rcs-trainer ()
+  (setq *rs* (make-instance 'rc-socket :send-port 6001)))
+
+(defun rcs-player ()
+  (setq *rs* (make-instance 'rc-socket :send-port 6000)))
+
+(defun rcs-init (&optional (rcs *rs*))
+  (if (eql 6001 (send-port rcs))
+      (print `(rcs send ,(rc-socket-send rcs (serverize '(init (version 9))))))
+    (if (eql 6000 (send-port rcs))
+	(print `(rcs send ,(rc-socket-send rcs (serverize '(init teamkenny (version 9))))))
+      (break "bad port for init ~a" (send-port rcs)))))
+    
+
+(defun rcs-read (&optional (rcs *rs*))
+  (dotimes (n 10)
+      (print `(rcs read ,(rc-socket-read rcs)))))
+
+;;;(defun rcs-read (rcs)
+;;;  (let ((mct 0))
+;;;    (do ((retry 0 (1+ retry)))
+;;;        ((or (> retry 2) (>= mct 9)))
+;;;      (do ((timeout 0 0)
+;;;           (tct 0 (1+ tct)))
+;;;          ((not (mp::wait-for-input-available (udp-socket rcs) :timeout timeout))
+;;;           (progn
+;;;             #+nah (when (zerop tct)
+;;;               (trc "sleeping")
+;;;               (sleep 1))
+;;;             rcs))
+;;;        (incf mct)
+;;;        (print `(rcs read ,mct ,tct ,(rc-socket-read rcs)))
+;;;        #+nah  (sleep 0.4)))))
+
+; --- send/receive immediate -------------------------------
+
+(defun rc-socket-exchange (socket msg$ &optional all
+                            (reader (lambda (msg$)
+                                      (let ((msg (read-from-string msg$ t))) ;; nil :end (length msg$))))
+                                        (case (car msg)
+                                          ((see sense_body server_param player_param player_type)
+                                           #+shhh (when all (trc "rcq> A:" (send-port socket) msg)))
+                                          (otherwise
+                                           (trc nil "rcq> A$" msg$)
+                                           (trc nil "rcq> A:" (send-port socket) msg)))))))
+  (declare (ignorable all))
+  (trc "rcq> Q:" (send-port socket) msg$)
+  (rc-socket-send socket msg$)
+  (do ((timeout 0 0))
+      (#-allegro nil
+        #+allegro (not (mp::wait-for-input-available (udp-socket socket) :timeout timeout)))
+    (let ((msg (rc-socket-read socket)))
+      (when (zerop (length msg))
+        (return))
+      (funcall reader msg))))
+  
+; --- close -----------------------------
+
+(defun rc-socket-close (s)
+  (prog1
+      #+allegro (close (udp-socket s))
+      #-allegro (socket-close (udp-socket s))
+    (setf (udp-socket s) nil)))
+
+; ---------------------------------------------
+
+(defmacro rc$ (content$ &rest args)
+  (assert (stringp content$)()
+    "RC$ does not evaluate the content arg, here ~a.~%Use RCX$ for that." content$)
+  `(format nil ,(format nil "(~a)~c" content$ #\null) ,@args))
+
+(defmacro rcx$ (content-form &rest args)
+  (let ((f$ (gensym)))
+    `(let ((,f$ (conc$ "(" ,content-form ")~c")))
+       (format nil ,f$ ,@args #\null))))
+
+; ----------------------------------------------
+
+#+test
+(socket::lookup-port 6000 "udp") ;; ok once server started
+
+#+test
+(defparameter *tk* (socket::make-socket
+                    :address-family :internet
+                    :type :datagram
+                    :connect :passive
+                    :local-host "127.1"
+                    :remote-port 6000))
+
+(defmodel client ()
+  ((init-port :reader init-port :initarg :init-port)
+   (socket :cell t :reader socket
+     :initform (c? (make-instance 'rc-socket :send-port (init-port self))))
+   
+   (server-init :cell t :initarg :server-init :accessor server-init)
+   (server-reached :cell t :initform (cv nil) :initarg :server-reached :accessor server-reached)))
+
+(defun pbad (s &optional (start 0))
+  (trc "in" start (length s))
+  (if (eql #\( (char s start))
+      (let (next)
+        (do ((close (1+ start) next))
+            ((>= close (length s))
+             (progn
+               (trc "last" (subseq s start (1- close)))
+               (trc "out" close (char s (1- close)))
+               close))
+          (cond
+           ((eql (char s close) #\))
+            (trc "ch" (subseq s start (1+ close)))
+            (return-from pbad close))
+           ((eql (char s close) #\()
+            (setf next (1+ (pbad s close))))
+           (t (setf next (1+ close))))
+         ))
+      (pbad s (1+ start))
+    ))
+
